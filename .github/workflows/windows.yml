@@ -1,1 +1,27 @@
-
+name: Verify Timer on Windows
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.0"
+      - name: Verify source archive
+        shell: pwsh
+        run: |
+          $expected = (Get-Content SHA256SUMS.txt).Split(" ")[0]
+          $actual = (Get-FileHash Timer-Studio-source-20261022.tar.gz -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) { throw "Source archive hash mismatch" }
+          tar -xzf Timer-Studio-source-20261022.tar.gz
+      - name: Test local network backend
+        working-directory: timer-studio
+        run: go test ./...
+      - name: Compile Windows source
+        working-directory: timer-studio
+        env:
+          CGO_ENABLED: "0"
+        run: go build -trimpath -ldflags "-s -w -H windowsgui" -o ../build/Timer-Studio.exe .
