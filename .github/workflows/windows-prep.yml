@@ -1,0 +1,60 @@
+name: Verify Windows release preparation
+on:
+  push:
+    paths: ['Timer-Windows-signing-preparation.zip', '.github/workflows/windows-prep.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  prep:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify and extract sources
+        shell: pwsh
+        run: |
+          foreach ($pair in @(@('Timer-Studio-source-20261022.tar.gz','SHA256SUMS.txt'),@('Timer-Windows-signing-preparation.zip','Timer-Windows-signing-preparation.sha256'))) {
+            $expected=(Get-Content $pair[1]).Split(' ')[0]
+            if((Get-FileHash $pair[0]).Hash.ToLower() -ne $expected){throw 'Hash mismatch'}
+          }
+          tar -xzf Timer-Studio-source-20261022.tar.gz
+          Expand-Archive Timer-Windows-signing-preparation.zip .
+      - run: go test ./...
+        working-directory: timer-studio
+      - run: go build -trimpath -ldflags "-s -w -H windowsgui" -o ../raw.exe .
+        working-directory: timer-studio
+        env:
+          CGO_ENABLED: '0'
+      - run: npm ci --ignore-scripts
+        working-directory: release-tools
+      - run: node release-tools/scripts/icon.cjs raw.exe "payload/Timer Studio.exe"
+      - name: Verify PowerShell syntax and unsigned rejection
+        shell: pwsh
+        run: |
+          foreach($file in Get-ChildItem release-tools/scripts/*.ps1){
+            $tokens=$null; $errors=$null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$errors)|Out-Null
+            if($errors.Count){throw ($errors|Out-String)}
+          }
+          $rejected=$false
+          try{./release-tools/scripts/Verify-Signatures.ps1 -Files 'payload/Timer Studio.exe' -ExpectedPublisher 'Pending approval'}catch{$rejected=$true}
+          if(!$rejected){throw 'Unsigned application was accepted'}
+      - name: Compile installer and export uninstaller
+        shell: pwsh
+        run: |
+          Copy-Item timer-studio/third_party/go-webview2/webviewloader/sdk/x64/WebView2Loader.dll payload/
+          Copy-Item release-tools/packaging/*LICENSE.txt payload/
+          Copy-Item release-tools/packaging/Third-Party-Notices.txt payload/
+          choco install nsis --no-progress -y
+          & 'C:/Program Files (x86)/NSIS/makensis.exe' /DEXPORT_UNINSTALLER "/DUNINSTALLER_PATH=$pwd/unsigned-uninstaller.exe" "/DPAYLOAD=$pwd/payload" "/DOUTPUT_INSTALLER=$pwd/unsigned-test-installer.exe" "/DTIMER_ICON=$pwd/release-tools/packaging/timer.ico" release-tools/packaging/installer.nsi
+          if($LASTEXITCODE -ne 0){throw 'NSIS build failed'}
+          if(!(Test-Path unsigned-uninstaller.exe)){throw 'Uninstaller missing'}
+          & 'C:/Program Files (x86)/NSIS/makensis.exe' "/DSIGNED_UNINSTALLER=$pwd/unsigned-uninstaller.exe" "/DPAYLOAD=$pwd/payload" "/DOUTPUT_INSTALLER=$pwd/embedding-test-only.exe" "/DTIMER_ICON=$pwd/release-tools/packaging/timer.ico" release-tools/packaging/installer.nsi
+          if($LASTEXITCODE -ne 0){throw 'Uninstaller embedding pass failed'}
+          # This is a mechanics test only. No signed artefact or public release is produced.
