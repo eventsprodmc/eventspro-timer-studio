@@ -1,0 +1,40 @@
+name: Verify Timer LAN on Windows
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - Timer-Companion-LAN-candidate.zip
+      - .github/workflows/windows-lan.yml
+permissions:
+  contents: read
+jobs:
+  windows-lan:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Extract isolated Timer candidate
+        shell: pwsh
+        run: Expand-Archive Timer-Companion-LAN-candidate.zip -DestinationPath timer-lan
+      - name: Install test dependencies
+        working-directory: timer-lan
+        run: npm install --no-save playwright pngjs jsqr
+      - name: Install browser for test
+        working-directory: timer-lan
+        run: npx playwright install chromium
+      - name: Verify backend and authorization
+        working-directory: timer-lan
+        run: node --test lan.test.cjs
+      - name: Windows browser and disconnected internet simulation
+        working-directory: timer-lan
+        run: node windows-browser.test.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Timer-LAN-Windows-evidence
+          path: |
+            timer-lan/windows-result.json
+            timer-lan/windows-*.png
