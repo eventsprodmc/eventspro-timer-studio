@@ -22,6 +22,11 @@ jobs:
       - name: Install test dependencies
         working-directory: timer-lan
         run: npm install --no-save playwright pngjs jsqr
+      - name: Build importable Companion module
+        working-directory: timer-lan/module
+        run: |
+          npm install
+          npm run package
       - name: Install browser for test
         working-directory: timer-lan
         run: npx playwright install chromium
@@ -36,5 +41,6 @@ jobs:
         with:
           name: Timer-LAN-Windows-evidence
           path: |
+            timer-lan/module/*.tgz
             timer-lan/windows-result.json
             timer-lan/windows-*.png
