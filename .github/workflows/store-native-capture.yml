@@ -1,4 +1,4 @@
-name: Capture actual Timer PRO Windows window
+name: Capture actual Timer PRO Windows WebView2 content
 on:
   workflow_dispatch:
     inputs:
@@ -20,10 +20,10 @@ jobs:
       - name: Verify exact Store candidate and parse PowerShell
         shell: pwsh
         run: |
-          $expected='4e5c0de235a1ed7ca027c9e3988927741e9bcb91f09a7f2ff2adec38cb3ace6c'
-          $actual=(Get-FileHash 'store-test-inputs/Timer-PRO-Windows-1.0.0.0.msix' -Algorithm SHA256).Hash.ToLower()
+          $expected='3db52383f2909cec1601d284903b0167e566951c62f55d7701a255cfa82d2a6e'
+          $actual=(Get-FileHash 'store-test-inputs/Timer-PRO-Windows-1.0.1.0.msix' -Algorithm SHA256).Hash.ToLower()
           if($actual -ne $expected){throw 'Store MSIX hash mismatch'}
-          foreach($file in @('scripts/Capture-Native-Timer.ps1','scripts/Prepare-Native-Desktop.ps1')){
+          foreach($file in @('scripts/Capture-Native-TimerV2.ps1')){
             $tokens=$null;$errors=$null
             [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file),[ref]$tokens,[ref]$errors)|Out-Null
             if($errors.Count){throw ($errors|Out-String)}
@@ -49,14 +49,17 @@ jobs:
             if(-not $runtime){throw 'WebView2 not found after official setup'}
           }
           Write-Host "Using Microsoft WebView2: $runtime"
-      - name: Prepare actual Windows desktop
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate restricted CDP helper syntax
         shell: pwsh
-        run: ./scripts/Prepare-Native-Desktop.ps1
+        run: node --check scripts/capture-webview-content.mjs
       - name: Run native Timer and capture its real window
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path evidence|Out-Null
-          & ./scripts/Capture-Native-Timer.ps1 -PackagePath store-test-inputs/Timer-PRO-Windows-1.0.0.0.msix -OutputDirectory evidence/native *>&1 | Tee-Object evidence/native-capture.log
+          & ./scripts/Capture-Native-TimerV2.ps1 -PackagePath store-test-inputs/Timer-PRO-Windows-1.0.1.0.msix -OutputDirectory evidence/native *>&1 | Tee-Object evidence/native-capture.log
           if($LASTEXITCODE -and $LASTEXITCODE -ne 0){exit $LASTEXITCODE}
       - name: Retain only screenshots and factual receipt
         if: always()
