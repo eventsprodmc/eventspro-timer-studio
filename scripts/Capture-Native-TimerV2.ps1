@@ -5,6 +5,12 @@ param(
  [string]$ExpectedExeSha256='20d2974d1f4054dbc2074d9f08e4d93fdcd13602c80bdba02c94056f243a2d0a'
 )
 $ErrorActionPreference='Stop'
+$diagnostics=@{stage='preflight';rectObservations=@()}
+trap {
+ $diagnostics.error=$_.Exception.Message;$diagnostics.stack=$_.ScriptStackTrace;$diagnostics.utc=(Get-Date).ToUniversalTime().ToString('o')
+ try {if(-not (Test-Path $OutputDirectory)){New-Item -ItemType Directory -Path $OutputDirectory -Force|Out-Null};$diagnostics|ConvertTo-Json -Depth 12|Set-Content (Join-Path $OutputDirectory 'failure-diagnostic.json') -Encoding utf8} catch {Write-Host "Could not write diagnostic JSON: $($_.Exception.Message)"}
+ throw
+}
 if($env:OS -ne 'Windows_NT' -or -not $env:GITHUB_ACTIONS -or -not $env:RUNNER_TEMP){throw 'Ephemeral Windows GitHub Actions only'}
 if(Test-Path $OutputDirectory){throw 'Use a new evidence directory'}
 if((Get-FileHash $PackagePath -Algorithm SHA256).Hash.ToLower() -ne $ExpectedPackageSha256){throw 'MSIX hash mismatch'}
@@ -28,8 +34,28 @@ using System;
 using System.Runtime.InteropServices;
 public class NativeTimerV2 {
  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left,Top,Right,Bottom; }
- [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd,out RECT rect);
- [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hwnd,int x,int y,int w,int h,bool repaint);
+ public class Measurement { public bool WindowOk,ClientOk,DpiOverride; public int Width,Height,ClientWidth,ClientHeight,Error; public uint Dpi; public long PreviousDpiContext; }
+ [DllImport("user32.dll",SetLastError=true)] public static extern bool GetWindowRect(IntPtr hwnd,out RECT rect);
+ [DllImport("user32.dll",SetLastError=true)] public static extern bool GetClientRect(IntPtr hwnd,out RECT rect);
+ [DllImport("user32.dll",SetLastError=true)] public static extern bool MoveWindow(IntPtr hwnd,int x,int y,int w,int h,bool repaint);
+ [DllImport("user32.dll",SetLastError=true)] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+ [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
+ public static Measurement Measure(IntPtr hwnd) {
+  IntPtr previous=IntPtr.Zero;var m=new Measurement();
+  try {
+   try {previous=SetThreadDpiAwarenessContext(new IntPtr(-4));m.DpiOverride=previous!=IntPtr.Zero;m.PreviousDpiContext=previous.ToInt64();} catch(EntryPointNotFoundException){}
+   RECT r,c;m.WindowOk=GetWindowRect(hwnd,out r);m.Error=Marshal.GetLastWin32Error();m.Width=r.Right-r.Left;m.Height=r.Bottom-r.Top;
+   m.ClientOk=GetClientRect(hwnd,out c);m.ClientWidth=c.Right-c.Left;m.ClientHeight=c.Bottom-c.Top;
+   try {m.Dpi=GetDpiForWindow(hwnd);}catch(EntryPointNotFoundException){}
+   return m;
+  } finally {if(previous!=IntPtr.Zero)SetThreadDpiAwarenessContext(previous);}
+ }
+ public static int Resize(IntPtr hwnd,int width,int height) {
+  IntPtr previous=IntPtr.Zero;
+  try {try{previous=SetThreadDpiAwarenessContext(new IntPtr(-4));}catch(EntryPointNotFoundException){}
+   bool ok=MoveWindow(hwnd,0,0,width,height,true);int error=Marshal.GetLastWin32Error();return ok?0:(error==0?-1:error);
+  } finally {if(previous!=IntPtr.Zero)SetThreadDpiAwarenessContext(previous);}
+ }
 }
 '@
 $listener=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,0)
@@ -41,6 +67,7 @@ try {
  # Microsoft-documented override, inherited only by this app and its WebView2 children.
  $info.Environment['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS']="--remote-debugging-port=$port --remote-debugging-address=127.0.0.1"
  $process=[Diagnostics.Process]::Start($info)
+ $diagnostics.stage='wait-title';$diagnostics.timerPid=$process.Id
  $deadline=(Get-Date).AddSeconds(60)
  $observedTitles=@();$previousObserved=$null;$nativeReady=$false
  do {
@@ -56,14 +83,34 @@ try {
    Write-Host "Own Timer PID=$($process.Id), HWND=$($process.MainWindowHandle.ToInt64()), observed title=[$caption]"
    $previousObserved=$observation
   }
+  $diagnostics.observedTitles=$observedTitles
   $nativeReady=$process.MainWindowHandle -ne 0 -and $caption -match '^Timer PRO'
  } while(-not $nativeReady -and (Get-Date) -lt $deadline)
  @{timerPid=$process.Id;exited=$false;ready=$nativeReady;expectedTitlePattern='^Timer PRO';observedTitles=$observedTitles}|ConvertTo-Json -Depth 6|Set-Content (Join-Path $root 'startup-diagnostic.json') -Encoding utf8
  if(-not $nativeReady){throw "Expected own Timer HWND/title was not ready within 60 seconds; last HWND=$($process.MainWindowHandle.ToInt64()), title=[$caption]"}
- if(-not [NativeTimerV2]::MoveWindow($process.MainWindowHandle,0,0,1440,1000,$true)){throw 'MoveWindow failed'}
- $rect=New-Object NativeTimerV2+RECT
- if(-not [NativeTimerV2]::GetWindowRect($process.MainWindowHandle,[ref]$rect)){throw 'GetWindowRect failed'}
- if(($rect.Right-$rect.Left) -lt 1366 -or ($rect.Bottom-$rect.Top) -lt 768){throw 'Real native HWND too small'}
+ $diagnostics.stage='wait-initial-size';$stable=0;$lastSize='';$sizeDeadline=(Get-Date).AddSeconds(12)
+ do {
+  $measurement=[NativeTimerV2]::Measure($process.MainWindowHandle)
+  $observation=@{utc=(Get-Date).ToUniversalTime().ToString('o');phase='before-resize';windowOk=$measurement.WindowOk;width=$measurement.Width;height=$measurement.Height;clientWidth=$measurement.ClientWidth;clientHeight=$measurement.ClientHeight;dpi=$measurement.Dpi;dpiOverride=$measurement.DpiOverride;win32Error=$measurement.Error}
+  $diagnostics.rectObservations+=,$observation
+  $size="$($measurement.Width)x$($measurement.Height)/$($measurement.ClientWidth)x$($measurement.ClientHeight)"
+  if($size -eq $lastSize){$stable++}else{$stable=0;Write-Host "Own native bounds before resize=$size DPI=$($measurement.Dpi) aware=$($measurement.DpiOverride) GetWindowRect=$($measurement.WindowOk) error=$($measurement.Error)"}
+  $lastSize=$size;Start-Sleep -Milliseconds 500
+ } while($stable -lt 3 -and (Get-Date) -lt $sizeDeadline)
+ $diagnostics.stage='resize';$resizeError=[NativeTimerV2]::Resize($process.MainWindowHandle,1440,1000);$diagnostics.resizeWin32Error=$resizeError
+ Write-Host "MoveWindow requested real 1440x1000; error=$resizeError"
+ if($resizeError -ne 0){throw "MoveWindow failed with Win32Error=$resizeError; prior bounds=$lastSize DPI=$($measurement.Dpi)"}
+ $stable=0;$lastSize='';$sizeDeadline=(Get-Date).AddSeconds(12)
+ do {
+  $measurement=[NativeTimerV2]::Measure($process.MainWindowHandle)
+  $diagnostics.rectObservations+=,@{utc=(Get-Date).ToUniversalTime().ToString('o');phase='after-resize';windowOk=$measurement.WindowOk;width=$measurement.Width;height=$measurement.Height;clientWidth=$measurement.ClientWidth;clientHeight=$measurement.ClientHeight;dpi=$measurement.Dpi;dpiOverride=$measurement.DpiOverride;win32Error=$measurement.Error}
+  $size="$($measurement.Width)x$($measurement.Height)/$($measurement.ClientWidth)x$($measurement.ClientHeight)"
+  if($size -eq $lastSize){$stable++}else{$stable=0;Write-Host "Own native bounds after resize=$size DPI=$($measurement.Dpi) aware=$($measurement.DpiOverride) GetWindowRect=$($measurement.WindowOk) error=$($measurement.Error)"}
+  $lastSize=$size;Start-Sleep -Milliseconds 500
+ } while($stable -lt 3 -and (Get-Date) -lt $sizeDeadline)
+ # Bounds are diagnostic, not a substitute for actual renderer metrics. The unchanged CDP helper enforces viewport and PNG >=1366x768.
+ $diagnostics|ConvertTo-Json -Depth 12|Set-Content (Join-Path $root 'window-diagnostic.json') -Encoding utf8
+ $diagnostics.stage='cdp-listener'
  $deadline=(Get-Date).AddSeconds(45);$connections=@()
  do {$connections=@(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue);if(-not $connections.Count){Start-Sleep -Milliseconds 500}} while(-not $connections.Count -and (Get-Date) -lt $deadline)
  if(-not $connections.Count){throw 'No WebView2 debug listener'}
@@ -79,8 +126,9 @@ try {
   $ancestor=Get-CimInstance Win32_Process -Filter "ProcessId=$($ancestor.ParentProcessId)" -ErrorAction SilentlyContinue
  }
  if(-not $found){throw 'WebView2 listener does not descend from the exact Timer EXE'}
- $provenance=@{packageSha256=$ExpectedPackageSha256;exeSha256=$ExpectedExeSha256;exePath=$exe;timerPid=$process.Id;hwnd=$process.MainWindowHandle.ToInt64();windowTitle=$process.MainWindowTitle;windowWidth=$rect.Right-$rect.Left;windowHeight=$rect.Bottom-$rect.Top;cdpPort=$port;listenerAddresses=@($connections.LocalAddress);processChain=$chain;expectedTargetUrl='http://127.0.0.1:9140/timer.html';source='Actual WebView2 content surface created by exact Windows Timer executable; no Win32 frame';physicalWindowsAcceptance=$false;storeIdentityInstallationTested=$false}
+ $provenance=@{packageSha256=$ExpectedPackageSha256;exeSha256=$ExpectedExeSha256;exePath=$exe;timerPid=$process.Id;hwnd=$process.MainWindowHandle.ToInt64();windowTitle=$process.MainWindowTitle;windowWidth=$measurement.Width;windowHeight=$measurement.Height;clientWidth=$measurement.ClientWidth;clientHeight=$measurement.ClientHeight;windowDpi=$measurement.Dpi;cdpPort=$port;listenerAddresses=@($connections.LocalAddress);processChain=$chain;expectedTargetUrl='http://127.0.0.1:9140/timer.html';source='Actual WebView2 content surface created by exact Windows Timer executable; no Win32 frame';physicalWindowsAcceptance=$false;storeIdentityInstallationTested=$false}
  $provenance|ConvertTo-Json -Depth 8|Set-Content (Join-Path $root 'native-provenance.json') -Encoding utf8
+ $diagnostics.stage='renderer-capture'
  & node (Join-Path $PSScriptRoot 'capture-webview-content.mjs') $port $root
  if($LASTEXITCODE -ne 0){throw "Actual WebView2 capture failed: $LASTEXITCODE"}
  Add-Type -AssemblyName System.Drawing
