@@ -12,8 +12,14 @@ New-Item -ItemType Directory -Path $OutputDirectory|Out-Null
 $root=(Resolve-Path $OutputDirectory).Path
 $work=Join-Path $env:RUNNER_TEMP ('timer-native-v2-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work|Out-Null
-Copy-Item $PackagePath (Join-Path $work 'package.zip')
-Expand-Archive (Join-Path $work 'package.zip') (Join-Path $work 'payload')
+# MSIX uses OPC URI-encoded names. Use the Windows SDK unpacker, not a generic ZIP extractor.
+$kits=Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
+$makeAppx=@(Get-ChildItem $kits -Filter MakeAppx.exe -Recurse -ErrorAction SilentlyContinue | Where-Object {$_.Directory.Name -eq 'x64'} | Sort-Object FullName -Descending | Select-Object -First 1)
+if($makeAppx.Count -ne 1){throw 'Official Windows SDK x64 MakeAppx.exe was not found'}
+$payload=Join-Path $work 'payload'
+if(Test-Path $payload){throw 'Unpack directory must be new'}
+& ($makeAppx[0].FullName) unpack /p (Resolve-Path $PackagePath).Path /d $payload
+if($LASTEXITCODE -ne 0){throw "Windows SDK MakeAppx unpack failed: $LASTEXITCODE"}
 $exe=Join-Path $work 'payload/Timer PRO.exe'
 if((Get-FileHash $exe -Algorithm SHA256).Hash.ToLower() -ne $ExpectedExeSha256){throw 'EXE hash mismatch'}
 if(Test-Path (Join-Path $env:LOCALAPPDATA 'EventsPRO/Timer Studio/WebView2')){throw 'Existing Timer profile: refuse to overwrite'}
