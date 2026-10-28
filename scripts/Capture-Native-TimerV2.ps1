@@ -37,7 +37,7 @@ public class NativeTimerV2 {
  public class Measurement { public bool WindowOk,ClientOk,DpiOverride; public int Width,Height,ClientWidth,ClientHeight,Error; public uint Dpi; public long PreviousDpiContext; }
  [DllImport("user32.dll",SetLastError=true)] public static extern bool GetWindowRect(IntPtr hwnd,out RECT rect);
  [DllImport("user32.dll",SetLastError=true)] public static extern bool GetClientRect(IntPtr hwnd,out RECT rect);
- [DllImport("user32.dll",SetLastError=true)] public static extern bool MoveWindow(IntPtr hwnd,int x,int y,int w,int h,bool repaint);
+ [DllImport("user32.dll",SetLastError=true)] public static extern bool SetWindowPos(IntPtr hwnd,IntPtr after,int x,int y,int w,int h,uint flags);
  [DllImport("user32.dll",SetLastError=true)] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
  public static Measurement Measure(IntPtr hwnd) {
@@ -53,7 +53,7 @@ public class NativeTimerV2 {
  public static int Resize(IntPtr hwnd,int width,int height) {
   IntPtr previous=IntPtr.Zero;
   try {try{previous=SetThreadDpiAwarenessContext(new IntPtr(-4));}catch(EntryPointNotFoundException){}
-   bool ok=MoveWindow(hwnd,0,0,width,height,true);int error=Marshal.GetLastWin32Error();return ok?0:(error==0?-1:error);
+   bool ok=SetWindowPos(hwnd,IntPtr.Zero,0,0,width,height,0x0414);int error=Marshal.GetLastWin32Error();return ok?0:(error==0?-1:error);
   } finally {if(previous!=IntPtr.Zero)SetThreadDpiAwarenessContext(previous);}
  }
 }
@@ -98,8 +98,8 @@ try {
   $lastSize=$size;Start-Sleep -Milliseconds 500
  } while($stable -lt 3 -and (Get-Date) -lt $sizeDeadline)
  $diagnostics.stage='resize';$resizeError=[NativeTimerV2]::Resize($process.MainWindowHandle,1440,1000);$diagnostics.resizeWin32Error=$resizeError
- Write-Host "MoveWindow requested real 1440x1000; error=$resizeError"
- if($resizeError -ne 0){throw "MoveWindow failed with Win32Error=$resizeError; prior bounds=$lastSize DPI=$($measurement.Dpi)"}
+ Write-Host "SetWindowPos own HWND flags=0x0414 requested real 1440x1000; error=$resizeError"
+ if($resizeError -ne 0){throw "SetWindowPos failed with Win32Error=$resizeError; prior bounds=$lastSize DPI=$($measurement.Dpi)"}
  $stable=0;$lastSize='';$sizeDeadline=(Get-Date).AddSeconds(12)
  do {
   $measurement=[NativeTimerV2]::Measure($process.MainWindowHandle)
