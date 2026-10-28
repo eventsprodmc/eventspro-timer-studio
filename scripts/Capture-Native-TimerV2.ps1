@@ -42,9 +42,24 @@ try {
  $info.Environment['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS']="--remote-debugging-port=$port --remote-debugging-address=127.0.0.1"
  $process=[Diagnostics.Process]::Start($info)
  $deadline=(Get-Date).AddSeconds(60)
- do {Start-Sleep -Milliseconds 500;$process.Refresh();if($process.HasExited){throw 'Timer exited before HWND creation'}} while($process.MainWindowHandle -eq 0 -and (Get-Date) -lt $deadline)
- if($process.MainWindowHandle -eq 0){throw 'No native Timer HWND; stop without alternate screenshots'}
- if($process.MainWindowTitle -notmatch 'Timer'){throw 'Unexpected native window title'}
+ $observedTitles=@();$previousObserved=$null;$nativeReady=$false
+ do {
+  Start-Sleep -Milliseconds 500;$process.Refresh()
+  if($process.HasExited){
+   @{timerPid=$process.Id;exited=$true;exitCode=$process.ExitCode;observedTitles=$observedTitles}|ConvertTo-Json -Depth 6|Set-Content (Join-Path $root 'startup-diagnostic.json') -Encoding utf8
+   throw "Timer exited before expected HWND/title; ExitCode=$($process.ExitCode)"
+  }
+  $caption=[string]$process.MainWindowTitle
+  $observation="$($process.MainWindowHandle.ToInt64()):$caption"
+  if($observation -ne $previousObserved){
+   $observedTitles+=@{utc=(Get-Date).ToUniversalTime().ToString('o');hwnd=$process.MainWindowHandle.ToInt64();title=$caption}
+   Write-Host "Own Timer PID=$($process.Id), HWND=$($process.MainWindowHandle.ToInt64()), observed title=[$caption]"
+   $previousObserved=$observation
+  }
+  $nativeReady=$process.MainWindowHandle -ne 0 -and $caption -match '^Timer PRO'
+ } while(-not $nativeReady -and (Get-Date) -lt $deadline)
+ @{timerPid=$process.Id;exited=$false;ready=$nativeReady;expectedTitlePattern='^Timer PRO';observedTitles=$observedTitles}|ConvertTo-Json -Depth 6|Set-Content (Join-Path $root 'startup-diagnostic.json') -Encoding utf8
+ if(-not $nativeReady){throw "Expected own Timer HWND/title was not ready within 60 seconds; last HWND=$($process.MainWindowHandle.ToInt64()), title=[$caption]"}
  if(-not [NativeTimerV2]::MoveWindow($process.MainWindowHandle,0,0,1440,1000,$true)){throw 'MoveWindow failed'}
  $rect=New-Object NativeTimerV2+RECT
  if(-not [NativeTimerV2]::GetWindowRect($process.MainWindowHandle,[ref]$rect)){throw 'GetWindowRect failed'}
